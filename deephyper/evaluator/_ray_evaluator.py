@@ -1,21 +1,45 @@
 import logging
-import traceback
+import os
 import time
-from collections import defaultdict, namedtuple
+import traceback
+from collections import defaultdict, deque, namedtuple
 
 import ray
-
 from deephyper.evaluator.evaluate import Evaluator
 
 logger = logging.getLogger(__name__)
 
+NODES_PER_TASK = 4
+
+def nodelist():
+    """
+    Get all compute nodes allocated in the current job context
+    """
+    node_str = os.environ["COBALT_PARTNAME"]
+    # string like: 1001-1005,1030,1034-1200
+    node_ids = []
+    ranges = node_str.split(",")
+    lo = None
+    hi = None
+    for node_range in ranges:
+        lo, *hi = node_range.split("-")
+        lo = int(lo)
+        if hi:
+            hi = int(hi[0])
+            node_ids.extend(list(range(lo, hi + 1)))
+        else:
+            node_ids.append(lo)
+
+    return [f"nid{node_id:05d}" for node_id in node_ids]
 
 class RayFuture:
     FAIL_RETURN_VALUE = Evaluator.FAIL_RETURN_VALUE
 
-    def __init__(self, func, x):
+    def __init__(self, func, x, nodes_queue):
         self.compute_objective = func
-        self.id_res = self.compute_objective.remote(x)
+        self.nodes_queue = nodes_queue
+        self.nodes = [self.nodes_queue.pop() for _ in range(NODES_PER_TASK)]
+        self.id_res = self.compute_objective.remote(x, self.nodes)
         self._state = "active"
         self._result = None
 
@@ -32,6 +56,7 @@ class RayFuture:
             except Exception:
                 print(traceback.format_exc())
                 self._state = "failed"
+            self.nodes_queue.extend(self.nodes)
         else:
             self._state = "active"
 
@@ -95,9 +120,13 @@ class RayEvaluator(Evaluator):
                 ray_init_kwargs["num_cpus"] = int(driver_num_cpus)
             if driver_num_gpus:
                 ray_init_kwargs["num_gpus"] = int(driver_num_gpus)
-            proc_info = ray.init(address=ray_address, _redis_password=ray_password)
+            proc_info = ray.init(
+                address=ray_address,
+                _redis_password=ray_password,
+                ignore_reinit_error=True,
+            )
         else:
-            proc_info = ray.init()
+            proc_info = ray.init(ignore_reinit_error=True)
 
         self.num_cpus_per_tasks = num_cpus_per_task
         self.num_gpus_per_tasks = num_gpus_per_task
@@ -117,12 +146,15 @@ class RayEvaluator(Evaluator):
         self._run_function = ray.remote(
             num_cpus=self.num_cpus_per_tasks,
             num_gpus=self.num_gpus_per_tasks,
-            # max_calls=1,
         )(self._run_function)
+        self.nodes_queue = self.init_queue()
+
+    def init_queue(self):
+        return deque(nodelist())
 
     def _eval_exec(self, x: dict):
         assert isinstance(x, dict)
-        future = RayFuture(self._run_function, x)
+        future = RayFuture(self._run_function, x, self.nodes_queue)
         return future
 
     @staticmethod
