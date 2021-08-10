@@ -9,7 +9,7 @@ from deephyper.evaluator.evaluate import Evaluator
 
 logger = logging.getLogger(__name__)
 
-NODES_PER_TASK = 4
+NODES_PER_TASK = int(os.environ.get("DH_NODES_PER_TASK", 4))
 
 def nodelist():
     """
