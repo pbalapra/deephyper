@@ -179,7 +179,7 @@ class Search:
         )
         parser.add_argument(
             "--num-cpus-per-task",
-            type=int,
+            type=float,
             default=1,
             help="Valid only if evaluator==ray",
         )

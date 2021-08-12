@@ -137,7 +137,7 @@ class RayEvaluator(Evaluator):
         self.num_gpus = int(
             sum([node["Resources"].get("GPU", 0) for node in ray.nodes()])
         )
-        self.num_workers = self.num_cpus // self.num_cpus_per_tasks
+        self.num_workers = int(self.num_cpus // self.num_cpus_per_tasks)
 
         logger.info(
             f"RAY Evaluator will execute: '{self._run_function}', proc_info: {proc_info}"
