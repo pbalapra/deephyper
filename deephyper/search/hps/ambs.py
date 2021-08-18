@@ -64,6 +64,8 @@ class AMBS(Search):
         n_jobs=1,  # 32 is good for Theta
         checkpoint="",
         transfer_learning="",
+        transfer_learning_strategy="best",
+        transfer_learning_epsilon=1.0,
         **kwargs,
     ):
         kwargs["cache_key"] = "to_dict"
@@ -72,13 +74,23 @@ class AMBS(Search):
         dhlogger.info(f"kappa={kappa}, xi={xi}")
 
         self.checkpoint = pd.read_csv(checkpoint) if checkpoint != "" else None
-        self.transfer_learning = pd.read_csv(transfer_learning) if transfer_learning != "" else None
+        self.transfer_learning = (
+            pd.read_csv(transfer_learning) if transfer_learning != "" else None
+        )
+        assert transfer_learning_strategy in ["best", "epsilon"]
+        self.transfer_learning_strategy = transfer_learning_strategy
+        self.transfer_learning_epsilon = transfer_learning_epsilon
+
+        space = self.problem.space
+        if self.transfer_learning is not None:
+            space = self.fit_transfer_learning()
+        dhlogger.info("Space: \n" + str(space))
 
         self.n_initial_points = self.evaluator.num_workers
         self.liar_strategy = liar_strategy
 
         self.opt = skopt.Optimizer(
-            dimensions=self.problem.space,
+            dimensions=space,
             base_estimator=self.get_surrogate_model(surrogate_model, n_jobs),
             acq_func=acq_func,
             acq_optimizer="sampling",
@@ -86,7 +98,6 @@ class AMBS(Search):
             n_initial_points=self.n_initial_points if self.checkpoint is None else 0,
             random_state=self.problem.seed,
         )
-
 
     @staticmethod
     def _extend_parser(parser):
@@ -140,6 +151,19 @@ class AMBS(Search):
             default="",
             help="Path to a CSV file which will be used for transfer learning.",
         )
+        parser.add_argument(
+            "--transfer-learning-strategy",
+            type=str,
+            default="best",
+            choices=["best", "epsilon"],
+            help="Strategy to follow for transfer learning.",
+        )
+        parser.add_argument(
+            "--transfer-learning-epsilon",
+            type=float,
+            default=1.0,
+            help="Epsilon to compare close objective values.",
+        )
         return parser
 
     def main(self):
@@ -152,7 +176,7 @@ class AMBS(Search):
         dhlogger.info(f"Generating {self.evaluator.num_workers} initial points...")
         self.evaluator.add_eval_batch(self.get_random_batch(size=self.n_initial_points))
 
-        print('Already evaluated points:')
+        print("Already evaluated points:")
         print(self.opt.Xi)
         print(self.opt.yi)
 
@@ -220,39 +244,32 @@ class AMBS(Search):
 
     def fit_checkpoint(self):
         hp_names = self.problem.space.get_hyperparameter_names()
-        print('problem space')
-        print(self.problem.space)
-        for hp in self.problem.space.get_hyperparameters():
-            print(dir(hp))
-            print(hp.name)
-            print(hp.lower)
-            print(hp.upper)
+
         x = self.checkpoint[hp_names].values.tolist()
         y = self.checkpoint.objective.tolist()
 
         self.opt.tell(x, [yi * -1.0 for yi in y])
-
 
     def return_cond(self, cond, cst_new):
         parent = cst_new.get_hyperparameter(cond.parent.name)
         child = cst_new.get_hyperparameter(cond.child.name)
         if type(cond) == CS.EqualsCondition:
             value = cond.value
-            cond_new = CS.EqualsCondition(child,parent,cond.value)
+            cond_new = CS.EqualsCondition(child, parent, cond.value)
         elif type(cond) == CS.GreaterThanCondition:
             value = cond.value
-            cond_new = CS.GreaterThanCondition(child,parent,value)
+            cond_new = CS.GreaterThanCondition(child, parent, value)
         elif type(cond) == CS.NotEqualsCondition:
             value = cond.value
-            cond_new = CS.GreaterThanCondition(child,parent,value)
+            cond_new = CS.GreaterThanCondition(child, parent, value)
         elif type(cond) == CS.LessThanCondition:
             value = cond.value
-            cond_new = CS.GreaterThanCondition(child,parent,value)
+            cond_new = CS.GreaterThanCondition(child, parent, value)
         elif type(cond) == CS.InCondition:
             values = cond.values
-            cond_new = CS.GreaterThanCondition(child,parent,values)
+            cond_new = CS.GreaterThanCondition(child, parent, values)
         else:
-            print('Not supported type'+str(type(cond)))
+            print("Not supported type" + str(type(cond)))
         return cond_new
 
     def return_forbid(self, cond, cst_new):
@@ -265,68 +282,100 @@ class AMBS(Search):
                 values = cond.values
                 cond_new = CS.ForbiddenInClause(hp, values)
             else:
-                print('Not supported type'+str(type(cond)))
+                print("Not supported type" + str(type(cond)))
         return cond_new
 
     def fit_transfer_learning(self):
-        cst =  self.problem.space
+        cst = self.problem.space
         if type(cst) != CS.ConfigurationSpace:
-            print('%s: not supported for trainsfer learning'%type(cst))
+            print("%s: not supported for transfer learning" % type(cst))
 
         res_df = self.transfer_learning
         res_df_names = res_df.columns.values
-        # best_index = np.argmax(res_df['objective'].values)
-        # best_param = res_df.iloc[best_index]
-        # print(best_param)
 
-        selection = abs(res_df.objective - res_df.objective.max()) <= 1
-        res_df = res_df[selection]
+        # "best": center on the best value
+        if self.transfer_learning_strategy == "best":
+            best_index = res_df["objective"].idxmax()
+            best_param = res_df.iloc[best_index]
 
-        # fac_numeric = 8.0
-        # fac_categorical = 10.0
+            # manual entry
+            fac_numeric = 8.0
+            fac_categorical = 10.0
+
+        else:
+            selection = (
+                abs(res_df.objective - res_df.objective.max())
+                <= self.transfer_learning_epsilon
+            )
+            res_df = res_df[selection]
 
         cst_new = CS.ConfigurationSpace(seed=cst.random.get_state()[1][0])
         hp_names = cst.get_hyperparameter_names()
         for hp_name in hp_names:
-            print(hp_name)
             hp = cst.get_hyperparameter(hp_name)
-            print(hp)
+            print(" -> ", hp)
             if hp_name in res_df_names:
-                if type(hp) == csh.UniformIntegerHyperparameter or type(hp) == csh.UniformFloatHyperparameter:
-                    # mu = best_param[hp.name]
-                    mu = res_df[hp.name].mean()
+                if (
+                    type(hp) == csh.UniformIntegerHyperparameter
+                    or type(hp) == csh.UniformFloatHyperparameter
+                ):
+
                     lower = hp.lower
                     upper = hp.upper
-                    # sigma = max(1.0, (upper - lower)/fac_numeric)
-                    sigma = res_df[hp.name].std()
+                    if self.transfer_learning_strategy == "best":
+                        mu = best_param[hp.name]
+                        sigma = (upper - lower) / fac_numeric
+                    else:
+                        mu = res_df[hp.name].mean()
+                        sigma = res_df[hp.name].std()
+
                     if type(hp) == csh.UniformIntegerHyperparameter:
-                        param_new = csh.NormalIntegerHyperparameter(name=hp.name, default_value=int(mu), mu=int(mu), sigma=int(sigma), lower=lower, upper=upper)
+
+                        param_new = csh.NormalIntegerHyperparameter(
+                            name=hp.name,
+                            default_value=int(mu),
+                            mu=int(mu),
+                            sigma=sigma,
+                            lower=lower,
+                            upper=upper,
+                        )
                     elif type(hp) == csh.UniformFloatHyperparameter:
-                        param_new = csh.NormalFloatHyperparameter(name=hp.name, default_value=mu, mu=mu, sigma=sigma, lower=lower, upper=upper)
+                        param_new = csh.NormalFloatHyperparameter(
+                            name=hp.name,
+                            default_value=mu,
+                            mu=mu,
+                            sigma=sigma,
+                            lower=lower,
+                            upper=upper,
+                        )
                     else:
                         pass
                     cst_new.add_hyperparameter(param_new)
                 elif type(hp) == csh.CategoricalHyperparameter:
-                    # p_uniform = 1/len(choices)
-                    c = Counter(res_df[hp.name])
-                    for choice in hp.choices: # to make sure every choice is possible
-                        if not(choice in c):
-                            c[choice] = 1
-                    cum = sum(c.values())
-                    norm_weights = [c[choice]/cum for choice in hp.choices]
-                    # weights = len(hp.choices)*[1.0]
-                    # index = choices.index(best_param[hp.name])
-                    # weights[index] = fac_categorical
-                    # norm_weights = [float(i)/sum(weights) for i in weights]
-                    # print(norm_weights)
-                    param_new = csh.CategoricalHyperparameter(name=hp.name, choices=hp.choices,weights=norm_weights)
+
+                    if self.transfer_learning_strategy == "best":
+                        weights = len(hp.choices) * [1.0]
+                        index = hp.choices.index(best_param[hp.name])
+                        weights[index] = fac_categorical
+                        norm_weights = [float(i) / sum(weights) for i in weights]
+                    else:
+                        c = Counter(res_df[hp.name])
+                        for choice in hp.choices:  # to make sure every choice is possible
+                            if not (choice in c):
+                                c[choice] = 1
+                        cum = sum(c.values())
+                        norm_weights = [c[choice] / cum for choice in hp.choices]
+
+                    param_new = csh.CategoricalHyperparameter(
+                        name=hp.name, choices=hp.choices, weights=norm_weights
+                    )
                     cst_new.add_hyperparameter(param_new)
                 else:
                     cst_new.add_hyperparameter(hp)
             else:
                 cst_new.add_hyperparameter(hp)
 
-
+        # Manage Conditions
         for cond in cst.get_conditions():
             if type(cond) == CS.AndConjunction or type(cond) == CS.OrConjunction:
                 cond_list = []
@@ -339,33 +388,36 @@ class AMBS(Search):
                 elif type(cond) == CS.OrConjunction:
                     cond_new = CS.OrConjunction(*cond_list)
                 else:
-                    print('Not implemented')
+                    print("Not implemented")
             else:
                 cond_new = self.return_cond(cond, cst_new)
             cst_new.add_condition(cond_new)
-        print(cst_new)
 
+        # Manage Forbiddens
         for cond in cst.get_forbiddens():
             if type(cond) == CS.ForbiddenAndConjunction:
                 cond_list = []
                 for comp in cond.components:
                     cond_list.append(self.return_forbid(comp, cst_new))
                 cond_new = CS.ForbiddenAndConjunction(*cond_list)
-            elif type(cond) == CS.ForbiddenEqualsClause or type(cond) == CS.ForbiddenInClause:
+            elif (
+                type(cond) == CS.ForbiddenEqualsClause
+                or type(cond) == CS.ForbiddenInClause
+            ):
                 cond_new = self.return_forbid(cond, cst_new)
             else:
-                print('Not supported type'+str(type(cond)))
+                print("Not supported type" + str(type(cond)))
             cst_new.add_forbidden_clause(cond_new)
 
+        print("New Search Space: ")
+        print(cst_new)
+        return cst_new
 
     def get_random_batch(self, size: int) -> list:
 
         if self.checkpoint is not None:
             batch = []
             self.fit_checkpoint()
-        elif self.transfer_learning is not None:
-            batch = []
-            self.fit_transfer_learning()
         else:
             batch = self.problem.starting_point_asdict
             # Replace None by "nan"
