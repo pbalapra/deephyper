@@ -27,6 +27,7 @@ Arguments of AMBS:
 
 import math
 import signal
+from collections import Counter
 
 
 import ConfigSpace as CS
@@ -72,7 +73,7 @@ class AMBS(Search):
 
         self.checkpoint = pd.read_csv(checkpoint) if checkpoint != "" else None
         self.transfer_learning = pd.read_csv(transfer_learning) if transfer_learning != "" else None
-        
+
         self.n_initial_points = self.evaluator.num_workers
         self.liar_strategy = liar_strategy
 
@@ -251,7 +252,7 @@ class AMBS(Search):
             values = cond.values
             cond_new = CS.GreaterThanCondition(child,parent,values)
         else:
-            print('Not supported type'+str(type(cond)))  
+            print('Not supported type'+str(type(cond)))
         return cond_new
 
     def return_forbid(self, cond, cst_new):
@@ -264,7 +265,7 @@ class AMBS(Search):
                 values = cond.values
                 cond_new = CS.ForbiddenInClause(hp, values)
             else:
-                print('Not supported type'+str(type(cond)))  
+                print('Not supported type'+str(type(cond)))
         return cond_new
 
     def fit_transfer_learning(self):
@@ -274,14 +275,17 @@ class AMBS(Search):
 
         res_df = self.transfer_learning
         res_df_names = res_df.columns.values
-        best_index = np.argmax(res_df['objective'].values)
-        best_param = res_df.iloc[best_index]
-        print(best_param) 
+        # best_index = np.argmax(res_df['objective'].values)
+        # best_param = res_df.iloc[best_index]
+        # print(best_param)
 
-        fac_numeric = 8.0 
-        fac_categorical = 10.0
+        selection = abs(res_df.objective - res_df.objective.max()) <= 1
+        res_df = res_df[selection]
 
-        cst_new = CS.ConfigurationSpace(seed=1234)
+        # fac_numeric = 8.0
+        # fac_categorical = 10.0
+
+        cst_new = CS.ConfigurationSpace(seed=cst.random.get_state()[1][0])
         hp_names = cst.get_hyperparameter_names()
         for hp_name in hp_names:
             print(hp_name)
@@ -289,25 +293,33 @@ class AMBS(Search):
             print(hp)
             if hp_name in res_df_names:
                 if type(hp) == csh.UniformIntegerHyperparameter or type(hp) == csh.UniformFloatHyperparameter:
-                    mu = best_param[hp.name]
+                    # mu = best_param[hp.name]
+                    mu = res_df[hp.name].mean()
                     lower = hp.lower
                     upper = hp.upper
-                    sigma = max(1.0, (upper - lower)/fac_numeric) 
+                    # sigma = max(1.0, (upper - lower)/fac_numeric)
+                    sigma = res_df[hp.name].std()
                     if type(hp) == csh.UniformIntegerHyperparameter:
-                        param_new = csh.NormalIntegerHyperparameter(name=hp.name, default_value=mu, mu=mu, sigma=sigma, lower=lower, upper=upper)
+                        param_new = csh.NormalIntegerHyperparameter(name=hp.name, default_value=int(mu), mu=int(mu), sigma=int(sigma), lower=lower, upper=upper)
                     elif type(hp) == csh.UniformFloatHyperparameter:
                         param_new = csh.NormalFloatHyperparameter(name=hp.name, default_value=mu, mu=mu, sigma=sigma, lower=lower, upper=upper)
                     else:
                         pass
                     cst_new.add_hyperparameter(param_new)
                 elif type(hp) == csh.CategoricalHyperparameter:
-                    choices = hp.choices
-                    weights = len(hp.choices)*[1.0]
-                    index = choices.index(best_param[hp.name])
-                    weights[index] = fac_categorical
-                    norm_weights = [float(i)/sum(weights) for i in weights] 
-                    print(norm_weights)
-                    param_new = csh.CategoricalHyperparameter(name=hp.name, choices=choices,weights=norm_weights)
+                    # p_uniform = 1/len(choices)
+                    c = Counter(res_df[hp.name])
+                    for choice in hp.choices: # to make sure every choice is possible
+                        if not(choice in c):
+                            c[choice] = 1
+                    cum = sum(c.values())
+                    norm_weights = [c[choice]/cum for choice in hp.choices]
+                    # weights = len(hp.choices)*[1.0]
+                    # index = choices.index(best_param[hp.name])
+                    # weights[index] = fac_categorical
+                    # norm_weights = [float(i)/sum(weights) for i in weights]
+                    # print(norm_weights)
+                    param_new = csh.CategoricalHyperparameter(name=hp.name, choices=hp.choices,weights=norm_weights)
                     cst_new.add_hyperparameter(param_new)
                 else:
                     cst_new.add_hyperparameter(hp)
@@ -342,7 +354,7 @@ class AMBS(Search):
             elif type(cond) == CS.ForbiddenEqualsClause or type(cond) == CS.ForbiddenInClause:
                 cond_new = self.return_forbid(cond, cst_new)
             else:
-                print('Not supported type'+str(type(cond)))    
+                print('Not supported type'+str(type(cond)))
             cst_new.add_forbidden_clause(cond_new)
 
 
@@ -371,7 +383,7 @@ class AMBS(Search):
                             type(hp) == csh.CategoricalHyperparameter
                             or type(hp) == csh.OrdinalHyperparameter
                         ):
-                            point[k] = "NA"                     
+                            point[k] = "NA"
 
         # Add more starting points
         n_points = max(0, size - len(batch))
