@@ -48,6 +48,9 @@ def _slurm_nodelist():
             node_ids.append(lo)
     return [f"bdw-{node_id:04d}" for node_id in node_ids]
 
+def _lsf_nodelist():
+    node_str = os.environ["LSB_HOSTS"]
+    return node_str.split(",")
 
 def nodelist():
     """
@@ -57,6 +60,8 @@ def nodelist():
         return _cobalt_nodelist()
     elif 'SLURM_JOB_NODELIST' in os.environ:
         return _slurm_nodelist()
+    elif 'LSB_HOSTS' in os.environ:
+        return _lsf_nodelist()
     else:
         return []
 
