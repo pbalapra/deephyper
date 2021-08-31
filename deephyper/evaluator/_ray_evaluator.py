@@ -11,10 +11,7 @@ logger = logging.getLogger(__name__)
 
 NODES_PER_TASK = int(os.environ.get("DH_NODES_PER_TASK", 4))
 
-def nodelist():
-    """
-    Get all compute nodes allocated in the current job context
-    """
+def _cobalt_nodelist():
     node_str = os.environ["COBALT_PARTNAME"]
     # string like: 1001-1005,1030,1034-1200
     node_ids = []
@@ -29,8 +26,39 @@ def nodelist():
             node_ids.extend(list(range(lo, hi + 1)))
         else:
             node_ids.append(lo)
-
     return [f"nid{node_id:05d}" for node_id in node_ids]
+
+def _slurm_nodelist():
+    node_str = os.environ["SLURM_JOB_NODELIST"]
+    # string like: bdw-[0123,0124-0126]
+    # NOTE: the following is not yet generic enough,
+    # technically we could have prefix other than bdw- when
+    # working with a different type of node, and we could
+    # have mixed prefixes (and not have the nodes in brakets also)/
+    # Something like this could be possible:
+    # bdw-[0123,0124-0126],bdwd-1239
+    ranges = nodes_str.split('[')[1].split(']')[0].split(',')
+    for node_range in ranges:
+        lo, *hi = node_range.split("-")
+        lo = int(lo)
+        if hi:
+            hi = int(hi[0])
+            node_ids.extend(list(range(lo, hi + 1)))
+        else:
+            node_ids.append(lo)
+    return [f"bdw-{node_id:04d}" for node_id in node_ids]
+
+
+def nodelist():
+    """
+    Get all compute nodes allocated in the current job context
+    """
+    if 'COBALT_PARTNAME' in os.environ:
+        return _cobalt_nodelist()
+    elif 'SLURM_JOB_NODELIST' in os.environ:
+        return _slurm_nodelist()
+    else:
+        return []
 
 class RayFuture:
     FAIL_RETURN_VALUE = Evaluator.FAIL_RETURN_VALUE
