@@ -30,6 +30,7 @@ def _cobalt_nodelist():
 
 def _slurm_nodelist():
     node_str = os.environ["SLURM_JOB_NODELIST"]
+    node_ids = []
     # string like: bdw-[0123,0124-0126]
     # NOTE: the following is not yet generic enough,
     # technically we could have prefix other than bdw- when
@@ -37,7 +38,7 @@ def _slurm_nodelist():
     # have mixed prefixes (and not have the nodes in brakets also)/
     # Something like this could be possible:
     # bdw-[0123,0124-0126],bdwd-1239
-    ranges = nodes_str.split('[')[1].split(']')[0].split(',')
+    ranges = node_str.split('[')[1].split(']')[0].split(',')
     for node_range in ranges:
         lo, *hi = node_range.split("-")
         lo = int(lo)
